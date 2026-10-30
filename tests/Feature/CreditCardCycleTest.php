@@ -7,6 +7,7 @@ use App\Models\ChartAccount;
 use App\Models\Counterparty;
 use App\Models\Expense;
 use App\Models\FinancialAccount;
+use App\Models\Payment;
 use App\Models\PaymentMethod;
 use App\Models\PaymentObligation;
 use App\Models\PurchaseOrder;
@@ -248,6 +249,56 @@ class CreditCardCycleTest extends TestCase
         ]);
         $this->assertDatabaseHas('journal_lines', [
             'chart_account_id' => $bankLedger->id, 'debit' => 0, 'credit' => 833.3333,
+        ]);
+    }
+
+    public function test_unapplied_card_overpayment_is_carried_into_a_future_statement(): void
+    {
+        $user = User::factory()->create();
+        Sanctum::actingAs($user);
+        $branch = $this->branch();
+        $expenseLedger = ChartAccount::create(['code' => '6102', 'name' => 'Subscriptions', 'type' => 'expense']);
+        $cardLiability = ChartAccount::create(['code' => '2102', 'name' => 'Card Payable', 'type' => 'liability']);
+        $payee = Counterparty::create(['type' => 'supplier', 'code' => 'PAYEE-2', 'name' => 'Subscription Vendor']);
+        $expense = Expense::create([
+            'branch_id' => $branch->id, 'number' => 'EXP-CARRY', 'payee_id' => $payee->id,
+            'chart_account_id' => $expenseLedger->id, 'expense_date' => '2026-11-01',
+            'currency' => 'PHP', 'amount' => 500, 'description' => 'Future card charge',
+        ]);
+        $card = FinancialAccount::create([
+            'owner_branch_id' => $branch->id, 'is_company_wide' => false,
+            'chart_account_id' => $cardLiability->id, 'kind' => 'credit_card',
+            'name' => 'Carry Forward Card', 'currency' => 'PHP', 'credit_limit' => 10000,
+            'statement_day' => 17, 'due_day' => 7, 'usable_for_payments' => true,
+        ]);
+        $card->accessibleBranches()->attach($branch->id);
+        $cardMethod = PaymentMethod::create([
+            'code' => 'CARD-CARRY', 'name' => 'Card', 'type' => 'credit_card', 'creates_obligation' => true,
+        ]);
+        $credit = Payment::create([
+            'branch_id' => $branch->id, 'number' => 'PAY-CARD-CREDIT', 'type' => 'chart_account',
+            'direction' => 'outflow', 'offset_account_id' => $cardLiability->id,
+            'payment_date' => '2026-10-13', 'currency' => 'PHP', 'amount' => 200,
+            'status' => 'posted', 'created_by' => $user->id, 'posted_by' => $user->id, 'posted_at' => now(),
+        ]);
+
+        $this->postJson('/api/payments', [
+            'branch_id' => $branch->id, 'type' => 'expense', 'expense_id' => $expense->id,
+            'offset_account_id' => $expenseLedger->id, 'payment_date' => '2026-11-01',
+            'currency' => 'PHP', 'lines' => [[
+                'financial_account_id' => $card->id, 'payment_method_id' => $cardMethod->id,
+                'amount' => 500,
+            ]],
+            'post' => true,
+        ])->assertCreated();
+
+        $statement = PaymentObligation::where('financial_account_id', $card->id)->firstOrFail();
+        $this->assertSame('500.0000', $statement->total_amount);
+        $this->assertSame('200.0000', $statement->paid_amount);
+        $this->assertSame('300.0000', $statement->balance_due);
+        $this->assertSame('partially_paid', $statement->status);
+        $this->assertDatabaseHas('payment_allocations', [
+            'payment_id' => $credit->id, 'payment_obligation_id' => $statement->id, 'amount' => 200,
         ]);
     }
 

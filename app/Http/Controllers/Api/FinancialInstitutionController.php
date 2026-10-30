@@ -5,12 +5,23 @@ namespace App\Http\Controllers\Api;
 use App\Http\Controllers\Controller;
 use App\Http\Requests\StoreFinancialInstitutionRequest;
 use App\Models\FinancialInstitution;
+use Illuminate\Http\Request;
+use Illuminate\Validation\Rule;
 
 class FinancialInstitutionController extends Controller
 {
-    public function index()
+    public function index(Request $request)
     {
-        return FinancialInstitution::orderBy('name')->paginate();
+        $filters = $this->filters($request);
+
+        return $this->query($filters)->get();
+    }
+
+    public function list(Request $request)
+    {
+        $filters = $this->filters($request);
+
+        return $this->query($filters)->get();
     }
 
     /**
@@ -47,5 +58,27 @@ class FinancialInstitutionController extends Controller
         $financialInstitution->delete();
 
         return response()->noContent();
+    }
+
+    private function filters(Request $request): array
+    {
+        return $request->validate([
+            'type' => ['nullable', Rule::in(['bank', 'e_wallet', 'cash', 'other'])],
+            'active' => ['nullable', 'boolean'],
+            'search' => ['nullable', 'string', 'max:255'],
+        ]);
+    }
+
+    private function query(array $filters)
+    {
+        return FinancialInstitution::query()
+            ->withCount('accounts')
+            ->when($filters['type'] ?? null, fn ($query, $value) => $query->where('type', $value))
+            ->when(array_key_exists('active', $filters), fn ($query) => $query->where('is_active', $filters['active']))
+            ->when($filters['search'] ?? null, fn ($query, $value) => $query->where(function ($search) use ($value) {
+                $search->where('name', 'like', "%{$value}%")
+                    ->orWhere('code', 'like', "%{$value}%");
+            }))
+            ->orderBy('name');
     }
 }

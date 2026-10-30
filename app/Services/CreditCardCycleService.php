@@ -43,6 +43,8 @@ class CreditCardCycleService
                     ['payment_obligation_id' => $obligation->id, 'amount' => $amount]
                 );
                 $this->recalculate($obligation);
+                $this->applyAvailableCredit($account, $obligation);
+                $this->recalculate($obligation);
             }
         }
     }
@@ -138,5 +140,43 @@ class CreditCardCycleService
     private function paidAmount(PaymentObligation $obligation)
     {
         return $obligation->allocations()->whereHas('payment', fn ($query) => $query->where('status', 'posted'))->sum('amount');
+    }
+
+    private function applyAvailableCredit(FinancialAccount $account, PaymentObligation $obligation): void
+    {
+        $balanceDue = (string) $obligation->balance_due;
+        if (bccomp($balanceDue, '0.0000', 4) !== 1) {
+            return;
+        }
+
+        $payments = Payment::query()
+            ->where('type', 'chart_account')
+            ->where('direction', 'outflow')
+            ->where('status', 'posted')
+            ->where('offset_account_id', $account->chart_account_id)
+            ->where('currency', $account->currency)
+            ->withSum('allocations as allocated_amount', 'amount')
+            ->orderBy('payment_date')
+            ->orderBy('id')
+            ->get();
+
+        foreach ($payments as $payment) {
+            if (bccomp($balanceDue, '0.0000', 4) !== 1) {
+                break;
+            }
+
+            $availableCredit = bcsub((string) $payment->amount, (string) ($payment->allocated_amount ?? 0), 4);
+            if (bccomp($availableCredit, '0.0000', 4) !== 1) {
+                continue;
+            }
+
+            $applied = bccomp($availableCredit, $balanceDue, 4) === 1 ? $balanceDue : $availableCredit;
+            $allocation = $payment->allocations()->firstOrNew([
+                'payment_obligation_id' => $obligation->id,
+            ]);
+            $allocation->amount = bcadd((string) ($allocation->amount ?? 0), $applied, 4);
+            $allocation->save();
+            $balanceDue = bcsub($balanceDue, $applied, 4);
+        }
     }
 }

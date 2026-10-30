@@ -9,9 +9,9 @@ class PaymentLine extends Model
 {
     use HasFactory;
 
-    protected $fillable = ['financial_account_id', 'payment_method_id', 'amount', 'installment_count', 'reference', 'legacy_source', 'legacy_id'];
+    protected $fillable = ['financial_account_id', 'payment_method_id', 'amount', 'installment_count', 'reference', 'confirmed_at', 'confirmed_by', 'legacy_source', 'legacy_id'];
 
-    protected $casts = ['amount' => 'decimal:4', 'installment_count' => 'integer'];
+    protected $casts = ['amount' => 'decimal:4', 'installment_count' => 'integer', 'confirmed_at' => 'datetime'];
 
     public function payment()
     {
@@ -26,6 +26,11 @@ class PaymentLine extends Model
     public function paymentMethod()
     {
         return $this->belongsTo(PaymentMethod::class);
+    }
+
+    public function confirmedBy()
+    {
+        return $this->belongsTo(User::class, 'confirmed_by');
     }
 
     public function obligationCharges()

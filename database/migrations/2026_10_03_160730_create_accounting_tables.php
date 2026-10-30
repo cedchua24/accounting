@@ -61,7 +61,7 @@ return new class extends Migration
             $table->text('account_number')->nullable()->comment('Encrypted at the application layer');
             $table->char('account_number_hash', 64)->nullable()->unique();
             $table->string('account_number_last4', 4)->nullable();
-            $table->string('account_holder')->nullable();
+            $table->unsignedBigInteger('account_holder')->nullable();
             $table->string('description')->nullable();
             $table->string('currency', 3)->default('PHP');
             $table->decimal('credit_limit', 19, 4)->nullable();
@@ -124,7 +124,7 @@ return new class extends Migration
             $table->date('invoice_date');
             $table->string('currency', 3)->default('PHP');
             $table->decimal('total_amount', 19, 4);
-            $table->enum('status', ['unpaid', 'partially_paid', 'paid', 'cancelled'])->default('unpaid');
+            $table->enum('status', ['unpaid', 'partially_paid', 'paid', 'partially_refunded', 'refunded', 'cancelled'])->default('unpaid');
             $table->string('legacy_source', 50)->nullable();
             $table->unsignedBigInteger('legacy_id')->nullable();
             $table->text('description')->nullable();
@@ -243,7 +243,7 @@ return new class extends Migration
             $table->id();
             $table->foreignId('payment_id')->nullable()->constrained()->restrictOnDelete();
             $table->foreignId('interbranch_order_id')->nullable()->constrained()->restrictOnDelete();
-            $table->enum('kind', ['payment', 'reversal', 'interbranch_transfer', 'interbranch_reversal', 'end_of_day_settlement', 'end_of_day_reversal', 'account_transfer', 'account_transfer_reversal', 'account_balance_adjustment', 'account_balance_adjustment_reversal']);
+            $table->enum('kind', ['payment', 'reversal', 'interbranch_transfer', 'interbranch_reversal', 'end_of_day_settlement', 'end_of_day_reversal', 'account_transfer', 'account_transfer_reversal', 'account_balance_adjustment', 'account_balance_adjustment_reversal', 'customer_refund', 'customer_refund_reversal']);
             $table->string('number', 60)->unique();
             $table->date('entry_date');
             $table->text('memo')->nullable();

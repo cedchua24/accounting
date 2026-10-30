@@ -5,7 +5,6 @@ namespace App\Services;
 use App\Models\ChartAccount;
 use App\Models\FinancialAccount;
 use App\Models\FinancialAccountAdjustment;
-use App\Models\FinancialAccountApplication;
 use App\Models\JournalLine;
 use App\Models\PaymentObligation;
 use Illuminate\Support\Facades\DB;
@@ -14,6 +13,44 @@ use Illuminate\Validation\ValidationException;
 
 class FinancialAccountAdjustmentService
 {
+    public function createCreditCardAdjustment(FinancialAccount $creditCard, array $data, ?int $userId): FinancialAccountAdjustment
+    {
+        return DB::transaction(function () use ($creditCard, $data, $userId) {
+            $creditCard = FinancialAccount::query()->lockForUpdate()->findOrFail($creditCard->id);
+            if ($creditCard->kind !== 'credit_card') {
+                throw ValidationException::withMessages(['credit_card' => 'The selected financial account is not a credit card.']);
+            }
+
+            $statement = PaymentObligation::query()->lockForUpdate()->findOrFail($data['payment_obligation_id']);
+            if ($statement->type !== 'credit_card_statement'
+                || (int) $statement->financial_account_id !== (int) $creditCard->id
+                || $statement->status === 'voided') {
+                throw ValidationException::withMessages([
+                    'payment_obligation_id' => 'Select an active statement belonging to this credit-card account.',
+                ]);
+            }
+
+            $expectedAmountDue = (string) $statement->balance_due;
+            $paidAmount = (string) $statement->paid_amount;
+            $actualAmountDue = bcadd((string) $data['actual_amount_due'], '0', 4);
+
+            return $this->create([
+                'financial_account_id' => $creditCard->id,
+                'payment_obligation_id' => $statement->id,
+                'adjustment_account_id' => $data['adjustment_account_id'],
+                'adjustment_date' => $data['adjustment_date'],
+                'currency' => $creditCard->currency,
+                'actual_balance' => bcadd($paidAmount, $actualAmountDue, 4),
+                'expected_amount_due_before' => $expectedAmountDue,
+                'paid_amount_before' => $paidAmount,
+                'actual_amount_due' => $actualAmountDue,
+                'reference' => $data['reference'] ?? null,
+                'reason' => $data['reason'],
+                'post' => true,
+            ], $userId);
+        });
+    }
+
     public function create(array $data, ?int $userId): FinancialAccountAdjustment
     {
         return DB::transaction(function () use ($data, $userId) {
@@ -38,7 +75,7 @@ class FinancialAccountAdjustmentService
             }
 
             $account = FinancialAccount::query()->lockForUpdate()
-                ->with('chartAccount', 'applications')->findOrFail($adjustment->financial_account_id);
+                ->with('chartAccount')->findOrFail($adjustment->financial_account_id);
             $offset = ChartAccount::query()->lockForUpdate()->findOrFail($adjustment->adjustment_account_id);
             $obligation = $adjustment->payment_obligation_id
                 ? PaymentObligation::query()->lockForUpdate()->findOrFail($adjustment->payment_obligation_id)
@@ -153,10 +190,6 @@ class FinancialAccountAdjustmentService
         if (! $account->is_active || $account->currency !== $currency || ! $validLedgerType) {
             throw ValidationException::withMessages(['financial_account_id' => 'Select an active financial account with the correct currency and ledger type.']);
         }
-        if ($account->applications->isNotEmpty()
-            && ! $account->applications->contains('application', FinancialAccountApplication::BALANCE_ADJUSTMENT)) {
-            throw ValidationException::withMessages(['financial_account_id' => 'This account is not enabled for balance adjustments.']);
-        }
         if (! $offset->is_active || (int) $offset->id === (int) $account->chart_account_id) {
             throw ValidationException::withMessages(['adjustment_account_id' => 'Select a different active chart account for the reconciliation difference.']);
         }
@@ -188,6 +221,7 @@ class FinancialAccountAdjustmentService
         return [
             'financialAccount.institution', 'financialAccount.chartAccount',
             'adjustmentAccount', 'paymentObligation', 'journalEntries.lines.chartAccount',
+            'createdBy', 'postedBy', 'voidedBy',
         ];
     }
 }

@@ -16,7 +16,7 @@ class PaymentController extends Controller
 
     public function index(Request $request)
     {
-        return Payment::with('branch', 'lines.financialAccount.institution', 'lines.financialAccount.ownerBranch', 'lines.paymentMethod', 'counterparty', 'salesInvoice', 'offsetAccount')
+        return Payment::with('branch', 'lines.financialAccount.institution', 'lines.financialAccount.ownerBranch', 'lines.paymentMethod', 'refunds', 'counterparty', 'salesInvoice', 'offsetAccount')
             ->when($request->branch_id, fn ($q, $branch) => $q->where('branch_id', $branch))
             ->when($request->type, fn ($q, $type) => $q->where('type', $type))
             ->when($request->status, fn ($q, $status) => $q->where('status', $status))
@@ -90,6 +90,6 @@ class PaymentController extends Controller
 
     private function relations(): array
     {
-        return ['branch', 'lines.financialAccount.institution', 'lines.financialAccount.ownerBranch', 'lines.financialAccount.chartAccount', 'lines.paymentMethod', 'lines.obligationCharges.obligation', 'counterparty', 'salesInvoice', 'purchaseOrder', 'expense', 'offsetAccount', 'allocations.obligation', 'journalEntries.lines.chartAccount'];
+        return ['branch', 'lines.financialAccount.institution', 'lines.financialAccount.ownerBranch', 'lines.financialAccount.chartAccount', 'lines.paymentMethod', 'lines.obligationCharges.obligation', 'refunds', 'counterparty', 'salesInvoice', 'purchaseOrder', 'expense', 'offsetAccount', 'allocations.obligation', 'journalEntries.lines.chartAccount'];
     }
 }

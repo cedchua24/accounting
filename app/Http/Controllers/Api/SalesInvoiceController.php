@@ -30,7 +30,7 @@ class SalesInvoiceController extends Controller
      */
     public function show(SalesInvoice $salesInvoice)
     {
-        return $salesInvoice->load('branch', 'customer', 'payments.lines.financialAccount', 'payments.lines.paymentMethod');
+        return $salesInvoice->load('branch', 'customer', 'payments.lines.financialAccount', 'payments.lines.paymentMethod', 'refunds.financialAccount', 'refunds.paymentMethod');
     }
 
     /**

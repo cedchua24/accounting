@@ -9,7 +9,7 @@ class PurchaseOrder extends Model
 {
     use HasFactory;
 
-    protected $fillable = ['branch_id', 'number', 'supplier_id', 'order_date', 'currency', 'total_amount', 'status', 'description'];
+    protected $fillable = ['branch_id', 'number', 'supplier_id', 'order_date', 'currency', 'total_amount', 'status', 'description', 'legacy_source', 'legacy_id'];
 
     protected $casts = ['order_date' => 'date', 'total_amount' => 'decimal:4'];
 

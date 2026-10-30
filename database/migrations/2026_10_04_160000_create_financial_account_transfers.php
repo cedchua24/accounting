@@ -13,7 +13,7 @@ return new class extends Migration
             $table->id();
             $table->string('number', 50)->unique();
             $table->foreignId('source_financial_account_id');
-            $table->foreignId('destination_financial_account_id');
+            $table->foreignId('destination_financial_account_id')->nullable();
             $table->date('transfer_date');
             $table->string('currency', 3)->default('PHP');
             $table->decimal('amount', 19, 4);

@@ -5,7 +5,10 @@ namespace App\Console\Commands;
 use App\Models\ChartAccount;
 use App\Models\FinancialAccount;
 use App\Models\FinancialAccountApplication;
+use App\Models\FinancialAccountApplicationType;
 use App\Models\FinancialInstitution;
+use App\Models\LegacyEntityMapping;
+use App\Models\UserAccount;
 use Illuminate\Console\Command;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
@@ -38,6 +41,10 @@ class ImportLegacyPaymentAccounts extends Command
                 ->select('account.*', 'bank.bank_name', 'payment_term.payment_term')
                 ->orderBy('account.id')
                 ->get();
+            $historicalReceiptAccounts = $legacy->table('payment_type')
+                ->whereIn('id', $legacy->table('mode_of_payment')->distinct()->pluck('payment_type_id'))
+                ->orderBy('id')
+                ->get();
             $usage = [
                 FinancialAccountApplication::CUSTOMER_RECEIPT => $legacy->table('mode_of_payment as payment')
                     ->join('payment_type_po as account', 'account.id', '=', 'payment.payment_type_id')
@@ -55,7 +62,7 @@ class ImportLegacyPaymentAccounts extends Command
             return self::FAILURE;
         }
 
-        $this->info("Found {$banks->count()} banks and {$accounts->count()} payment accounts.");
+        $this->info("Found {$banks->count()} banks, {$accounts->count()} payment accounts, and {$historicalReceiptAccounts->count()} historical receipt accounts.");
         $this->validateLegacyRows($banks, $accounts);
 
         if ($this->option('dry-run')) {
@@ -70,12 +77,18 @@ class ImportLegacyPaymentAccounts extends Command
                     implode(', ', $this->applicationsFor($row, $usage)),
                 ])->all()
             );
+            $this->table(
+                ['Legacy table', 'Legacy ID', 'Historical receipt account', 'Reference'],
+                $historicalReceiptAccounts->map(fn ($row) => [
+                    'payment_type', $row->id, $row->payment_type, $row->payment_type_description,
+                ])->all()
+            );
             $this->comment('Dry run complete. Legacy balances were intentionally excluded.');
 
             return self::SUCCESS;
         }
 
-        DB::transaction(function () use ($source, $banks, $accounts, $usage) {
+        DB::transaction(function () use ($source, $banks, $accounts, $historicalReceiptAccounts, $usage) {
             foreach ($banks as $bank) {
                 $this->importInstitution($source, $bank);
             }
@@ -83,9 +96,13 @@ class ImportLegacyPaymentAccounts extends Command
             foreach ($accounts as $account) {
                 $this->importAccount($source, $account, $usage);
             }
+
+            foreach ($historicalReceiptAccounts as $account) {
+                $this->importHistoricalReceiptAccount($source, $account);
+            }
         });
 
-        $this->info("Imported {$banks->count()} financial institutions and {$accounts->count()} financial accounts.");
+        $this->info("Imported {$banks->count()} financial institutions, {$accounts->count()} current accounts, and mapped {$historicalReceiptAccounts->count()} historical receipt accounts.");
         $this->comment('Fresh central IDs were generated. Cached balance and total_balance_due values were not imported.');
 
         return self::SUCCESS;
@@ -121,14 +138,36 @@ class ImportLegacyPaymentAccounts extends Command
             'legacy_source' => $source.'.bank',
             'legacy_id' => (int) $bank->id,
         ])->save();
+
+        LegacyEntityMapping::updateOrCreate(
+            ['source_system' => $source, 'legacy_table' => 'bank', 'legacy_id' => (int) $bank->id],
+            ['central_type' => FinancialInstitution::class, 'central_id' => $institution->id]
+        );
     }
 
     private function importAccount(string $source, object $row, array $usage): void
     {
-        $account = FinancialAccount::where([
+        $mappedAccountId = LegacyEntityMapping::where([
+            'source_system' => $source,
+            'legacy_table' => 'payment_type_po',
+            'legacy_id' => (int) $row->id,
+            'central_type' => FinancialAccount::class,
+        ])->value('central_id');
+        $account = $mappedAccountId ? FinancialAccount::find($mappedAccountId) : null;
+        $account ??= FinancialAccount::where([
             'legacy_source' => $source.'.payment_type_po',
             'legacy_id' => (int) $row->id,
         ])->first();
+
+        $institutionId = LegacyEntityMapping::where([
+            'source_system' => $source,
+            'legacy_table' => 'bank',
+            'legacy_id' => (int) $row->bank_id,
+            'central_type' => FinancialInstitution::class,
+        ])->value('central_id');
+        if (! $institutionId) {
+            throw new RuntimeException("Bank {$row->bank_id} was not mapped before account {$row->id}.");
+        }
 
         $kind = $this->accountKind($row);
         $applications = $this->applicationsFor($row, $usage);
@@ -146,12 +185,12 @@ class ImportLegacyPaymentAccounts extends Command
         $account->fill([
             'owner_branch_id' => null,
             'is_company_wide' => true,
-            'financial_institution_id' => (int) $row->bank_id,
+            'financial_institution_id' => $institutionId,
             'chart_account_id' => $ledger->id,
             'kind' => $kind,
             'name' => $this->displayName($row),
             'account_number' => $kind === 'cash' ? null : trim((string) $row->account_number),
-            'account_holder' => trim((string) $row->account_name) ?: null,
+            'account_holder' => $this->resolveAccountHolderId((string) $row->account_name),
             'description' => trim((string) $row->account_description) ?: null,
             'currency' => 'PHP',
             'credit_limit' => $kind === 'credit_card' ? max(0, (float) $row->credit_limit) : null,
@@ -170,10 +209,18 @@ class ImportLegacyPaymentAccounts extends Command
             'legacy_id' => (int) $row->id,
         ])->save();
 
-        $account->applications()->where('source', 'legacy_import')->whereNotIn('application', $applications)->delete();
+        LegacyEntityMapping::updateOrCreate(
+            ['source_system' => $source, 'legacy_table' => 'payment_type_po', 'legacy_id' => (int) $row->id],
+            ['central_type' => FinancialAccount::class, 'central_id' => $account->id]
+        );
+
+        $applicationIds = FinancialAccountApplicationType::query()
+            ->whereIn('code', $applications)
+            ->pluck('id', 'code');
+        $account->applications()->where('source', 'legacy_import')->whereNotIn('application_id', $applicationIds->values())->delete();
         foreach ($applications as $application) {
             $account->applications()->firstOrCreate(
-                ['application' => $application],
+                ['application_id' => $applicationIds->get($application)],
                 ['source' => 'legacy_import']
             );
         }
@@ -182,6 +229,12 @@ class ImportLegacyPaymentAccounts extends Command
     private function applicationsFor(object $row, array $usage): array
     {
         $applications = collect();
+        if ($this->accountKind($row) === 'credit_card') {
+            $applications->push(
+                FinancialAccountApplication::PURCHASE_ORDER_PAYMENT,
+                FinancialAccountApplication::EXPENSE_PAYMENT,
+            );
+        }
         if ((bool) $row->is_customer || $usage[FinancialAccountApplication::CUSTOMER_RECEIPT]->has((int) $row->id)) {
             $applications->push(FinancialAccountApplication::CUSTOMER_RECEIPT);
         }
@@ -198,6 +251,123 @@ class ImportLegacyPaymentAccounts extends Command
         return $applications->isEmpty()
             ? [FinancialAccountApplication::UNCLASSIFIED]
             : $applications->unique()->sort()->values()->all();
+    }
+
+    private function importHistoricalReceiptAccount(string $source, object $row): void
+    {
+        $existingCurrent = LegacyEntityMapping::where([
+            'source_system' => $source,
+            'legacy_table' => 'payment_type_po',
+            'legacy_id' => (int) $row->id,
+            'central_type' => FinancialAccount::class,
+        ])->first();
+        if ($existingCurrent && $account = FinancialAccount::find($existingCurrent->central_id)) {
+            LegacyEntityMapping::updateOrCreate(
+                ['source_system' => $source, 'legacy_table' => 'payment_type', 'legacy_id' => (int) $row->id],
+                ['central_type' => FinancialAccount::class, 'central_id' => $account->id, 'metadata' => ['historical_only' => false]]
+            );
+
+            return;
+        }
+
+        $mappedId = LegacyEntityMapping::where([
+            'source_system' => $source,
+            'legacy_table' => 'payment_type',
+            'legacy_id' => (int) $row->id,
+            'central_type' => FinancialAccount::class,
+        ])->value('central_id');
+        $account = $mappedId ? FinancialAccount::find($mappedId) : null;
+        $kind = $this->historicalReceiptKind((string) $row->payment_type);
+        $institution = $this->historicalReceiptInstitution((string) $row->payment_type);
+        $ledger = ChartAccount::updateOrCreate(
+            ['code' => 'LEGACY-RECEIPT-'.strtoupper(dechex(crc32($source))).'-'.$row->id],
+            [
+                'name' => Str::limit('Historical receipt - '.trim((string) $row->payment_type), 255, ''),
+                'type' => 'asset',
+                'parent_id' => ChartAccount::where('code', '1000')->value('id'),
+                'is_active' => false,
+            ]
+        );
+
+        $account ??= new FinancialAccount;
+        $account->fill([
+            'owner_branch_id' => null,
+            'is_company_wide' => true,
+            'financial_institution_id' => $institution?->id,
+            'chart_account_id' => $ledger->id,
+            'kind' => $kind,
+            'name' => 'Historical - '.trim((string) $row->payment_type),
+            'account_number' => null,
+            'account_holder' => null,
+            'description' => 'Legacy payment_type reference: '.trim((string) $row->payment_type_description),
+            'currency' => 'PHP',
+            'usable_for_receipts' => true,
+            'usable_for_payments' => false,
+            'is_active' => false,
+            'legacy_source' => $source.'.payment_type',
+            'legacy_id' => (int) $row->id,
+        ])->save();
+        $account->applications()->firstOrCreate(
+            ['application_id' => FinancialAccountApplicationType::where('code', FinancialAccountApplication::CUSTOMER_RECEIPT)->value('id')],
+            ['source' => 'legacy_historical']
+        );
+        LegacyEntityMapping::updateOrCreate(
+            ['source_system' => $source, 'legacy_table' => 'payment_type', 'legacy_id' => (int) $row->id],
+            [
+                'central_type' => FinancialAccount::class,
+                'central_id' => $account->id,
+                'metadata' => ['historical_only' => true],
+            ]
+        );
+    }
+
+    private function historicalReceiptKind(string $name): string
+    {
+        $name = Str::upper($name);
+
+        return match (true) {
+            str_contains($name, 'CASH') && ! str_contains($name, 'GCASH') => 'cash',
+            str_contains($name, 'GCASH'), str_contains($name, 'MAYA') => 'e_wallet',
+            default => 'bank_account',
+        };
+    }
+
+    private function resolveAccountHolderId(string $name): ?int
+    {
+        $name = trim($name);
+        if ($name === '') {
+            return null;
+        }
+
+        $normalized = strtolower((string) preg_replace('/[^a-z0-9]+/i', '', $name));
+        $holder = UserAccount::all()->first(fn (UserAccount $candidate) =>
+            strtolower((string) preg_replace('/[^a-z0-9]+/i', '', $candidate->name)) === $normalized
+        );
+        if ($holder) {
+            return $holder->id;
+        }
+
+        return UserAccount::create([
+            'code' => 'LEGACY-HOLDER-'.strtoupper(substr(sha1($normalized), 0, 12)),
+            'type' => str_contains(strtoupper($name), 'TRADING') ? 'company' : 'individual',
+            'name' => $name,
+            'is_active' => true,
+        ])->id;
+    }
+
+    private function historicalReceiptInstitution(string $name): ?FinancialInstitution
+    {
+        $name = Str::upper($name);
+        $code = match (true) {
+            str_contains($name, 'GCASH') => 'GCASH',
+            str_contains($name, 'MAYA') => 'MAYA',
+            str_contains($name, 'BPI') => 'BPI',
+            str_contains($name, 'BDO') => 'BDO',
+            str_contains($name, 'CASH') => 'CASH',
+            default => null,
+        };
+
+        return $code ? FinancialInstitution::where('code', $code)->first() : null;
     }
 
     private function accountKind(object $row): string

@@ -2,6 +2,7 @@
 
 namespace App\Services;
 
+use App\Models\ChartAccount;
 use App\Models\FinancialAccount;
 use App\Models\FinancialAccountApplication;
 use App\Models\FinancialAccountTransfer;
@@ -15,13 +16,15 @@ class FinancialAccountTransferService
     public function create(array $data, ?int $userId): FinancialAccountTransfer
     {
         return DB::transaction(function () use ($data, $userId) {
+            $post = ! empty($data['post']);
+            unset($data['post']);
             $transfer = FinancialAccountTransfer::create([
                 ...$data,
                 'number' => 'TRF-'.Str::upper((string) Str::ulid()),
                 'created_by' => $userId,
             ]);
 
-            return ! empty($data['post'])
+            return $post
                 ? $this->post($transfer, $userId)
                 : $transfer->load($this->relations());
         });
@@ -35,13 +38,21 @@ class FinancialAccountTransferService
                 throw ValidationException::withMessages(['status' => 'Only draft account transfers can be posted.']);
             }
 
+            $accountIds = array_filter([
+                $transfer->source_financial_account_id,
+                $transfer->destination_financial_account_id,
+            ]);
             $accounts = FinancialAccount::query()
-                ->whereKey([$transfer->source_financial_account_id, $transfer->destination_financial_account_id])
+                ->whereKey($accountIds)
                 ->orderBy('id')->lockForUpdate()->with('chartAccount', 'applications')->get()->keyBy('id');
             $source = $accounts->get($transfer->source_financial_account_id);
             $destination = $accounts->get($transfer->destination_financial_account_id);
             $this->assertAccount($source, $transfer->currency, true);
-            $this->assertAccount($destination, $transfer->currency, false);
+            $this->assertTransferMethod($source, $transfer->transfer_method);
+
+            if ($transfer->destination_type === 'internal') {
+                $this->assertAccount($destination, $transfer->currency, false);
+            }
 
             $available = JournalLine::query()->where('chart_account_id', $source->chart_account_id)
                 ->selectRaw('COALESCE(SUM(debit - credit), 0) AS balance')->value('balance');
@@ -49,23 +60,40 @@ class FinancialAccountTransferService
                 throw ValidationException::withMessages(['amount' => 'The transfer amount exceeds the source account balance.']);
             }
 
+            $destinationName = $transfer->destination_type === 'internal'
+                ? $destination->name
+                : $transfer->recipient_name;
             $entry = $transfer->journalEntries()->create([
                 'kind' => 'account_transfer',
                 'number' => 'JE-'.$transfer->number,
                 'entry_date' => $transfer->transfer_date,
-                'memo' => $transfer->memo ?: "Transfer from {$source->name} to {$destination->name}",
+                'memo' => $transfer->memo ?: "Transfer from {$source->name} to {$destinationName}",
                 'created_by' => $userId,
             ]);
+            if ($transfer->destination_type === 'internal') {
+                $debitAccountId = $destination->chart_account_id;
+                $debitDescription = 'Transfer received from '.$source->name;
+            } else {
+                $offsetAccount = ChartAccount::query()->lockForUpdate()->find($transfer->offset_account_id);
+                if (! $offsetAccount || ! $offsetAccount->is_active
+                    || (int) $offsetAccount->id === (int) $source->chart_account_id) {
+                    throw ValidationException::withMessages([
+                        'offset_account_id' => 'Select an active offset account different from the source account ledger.',
+                    ]);
+                }
+                $debitAccountId = $offsetAccount->id;
+                $debitDescription = 'External transfer to '.$transfer->recipient_name;
+            }
             $entry->lines()->createMany([
                 [
-                    'chart_account_id' => $destination->chart_account_id,
+                    'chart_account_id' => $debitAccountId,
                     'debit' => $transfer->amount, 'credit' => 0,
-                    'description' => 'Transfer received from '.$source->name,
+                    'description' => $debitDescription,
                 ],
                 [
                     'chart_account_id' => $source->chart_account_id,
                     'debit' => 0, 'credit' => $transfer->amount,
-                    'description' => 'Transfer sent to '.$destination->name,
+                    'description' => 'Transfer sent to '.$destinationName,
                 ],
             ]);
             $transfer->update(['status' => 'posted', 'posted_by' => $userId, 'posted_at' => now()]);
@@ -119,11 +147,29 @@ class FinancialAccountTransferService
         }
     }
 
+    private function assertTransferMethod(FinancialAccount $source, string $method): void
+    {
+        $compatibleKinds = match ($method) {
+            'cash' => ['cash'],
+            'online' => ['bank_account', 'checking_account'],
+            'e_wallet' => ['e_wallet'],
+            'cheque' => ['checking_account'],
+            default => [],
+        };
+
+        if (! in_array($source->kind, $compatibleKinds, true)) {
+            throw ValidationException::withMessages([
+                'transfer_method' => "The {$method} method is not compatible with the selected source account.",
+            ]);
+        }
+    }
+
     private function relations(): array
     {
         return [
             'sourceAccount.institution', 'sourceAccount.chartAccount',
             'destinationAccount.institution', 'destinationAccount.chartAccount',
+            'counterparty', 'offsetAccount',
             'journalEntries.lines.chartAccount',
         ];
     }

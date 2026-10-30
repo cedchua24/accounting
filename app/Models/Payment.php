@@ -9,7 +9,12 @@ class Payment extends Model
 {
     use HasFactory;
 
-    protected $fillable = ['number', 'branch_id', 'type', 'direction', 'counterparty_id', 'sales_invoice_id', 'purchase_order_id', 'expense_id', 'offset_account_id', 'payment_date', 'currency', 'amount', 'idempotency_key', 'status', 'memo', 'created_by'];
+    protected $fillable = [
+        'number', 'branch_id', 'type', 'direction', 'counterparty_id',
+        'sales_invoice_id', 'purchase_order_id', 'expense_id', 'offset_account_id',
+        'payment_date', 'currency', 'amount', 'idempotency_key', 'status', 'memo',
+        'created_by', 'posted_by', 'posted_at', 'voided_by', 'voided_at', 'void_reason',
+    ];
 
     protected $attributes = ['status' => 'draft'];
 
@@ -58,5 +63,10 @@ class Payment extends Model
     public function allocations()
     {
         return $this->hasMany(PaymentAllocation::class);
+    }
+
+    public function refunds()
+    {
+        return $this->hasMany(CustomerRefund::class, 'original_payment_id');
     }
 }

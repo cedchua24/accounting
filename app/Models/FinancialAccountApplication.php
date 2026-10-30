@@ -2,8 +2,11 @@
 
 namespace App\Models;
 
+use Illuminate\Database\Eloquent\Casts\Attribute;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
+use Illuminate\Support\Str;
+use InvalidArgumentException;
 
 class FinancialAccountApplication extends Model
 {
@@ -29,7 +32,7 @@ class FinancialAccountApplication extends Model
 
     public const UNCLASSIFIED = 'unclassified';
 
-    protected $fillable = ['application', 'source'];
+    protected $fillable = ['application_id', 'application', 'source'];
 
     public static function selectable(): array
     {
@@ -46,8 +49,91 @@ class FinancialAccountApplication extends Model
         ];
     }
 
+    public static function normalize(mixed $application): mixed
+    {
+        if (is_array($application)) {
+            $application = $application['value']
+                ?? $application['application']
+                ?? $application['id']
+                ?? $application;
+        }
+
+        if (is_int($application) || (is_string($application) && ctype_digit($application))) {
+            return FinancialAccountApplicationType::query()->whereKey((int) $application)->value('code')
+                ?? self::query()->with('type')->find((int) $application)?->application
+                ?? $application;
+        }
+
+        if (! is_string($application)) {
+            return $application;
+        }
+
+        $value = (string) Str::of($application)
+            ->trim()
+            ->lower()
+            ->replace(['-', ' '], '_');
+
+        return [
+            'customer_receipts' => self::CUSTOMER_RECEIPT,
+            'purchase_order_payments' => self::PURCHASE_ORDER_PAYMENT,
+            'expense_payments' => self::EXPENSE_PAYMENT,
+            'interbranch_settlements' => self::INTERBRANCH_SETTLEMENT,
+            'end_of_day_settlements' => self::END_OF_DAY_SETTLEMENT,
+            'account_transfers' => self::ACCOUNT_TRANSFER,
+            'balance_adjustments' => self::BALANCE_ADJUSTMENT,
+            'obligation_payments' => self::OBLIGATION_PAYMENT,
+            'direct_payments' => self::DIRECT_PAYMENT,
+        ][$value] ?? $value;
+    }
+
+    public static function normalizeId(mixed $application): mixed
+    {
+        if (is_array($application)) {
+            $application = $application['application_id']
+                ?? $application['value']
+                ?? $application['application']
+                ?? $application['id']
+                ?? $application;
+        }
+
+        if (is_int($application) || (is_string($application) && ctype_digit($application))) {
+            return (int) $application;
+        }
+
+        $code = self::normalize($application);
+
+        return is_string($code)
+            ? FinancialAccountApplicationType::query()->where('code', $code)->value('id') ?? $application
+            : $application;
+    }
+
     public function financialAccount()
     {
         return $this->belongsTo(FinancialAccount::class);
+    }
+
+    public function type()
+    {
+        return $this->belongsTo(FinancialAccountApplicationType::class, 'application_id');
+    }
+
+    protected function application(): Attribute
+    {
+        return Attribute::make(
+            get: fn () => $this->relationLoaded('type')
+                ? $this->type?->code
+                : $this->type()->value('code'),
+            set: function (string $value) {
+                $applicationId = FinancialAccountApplicationType::query()
+                    ->where('code', $value)
+                    ->value('id');
+
+                if (! $applicationId) {
+                    throw new InvalidArgumentException("Unknown financial account application: {$value}");
+                }
+
+                return ['application_id' => $applicationId];
+            },
+        );
     }
 }

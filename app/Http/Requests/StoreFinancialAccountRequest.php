@@ -2,6 +2,7 @@
 
 namespace App\Http\Requests;
 
+use App\Models\FinancialAccountApplication;
 use Illuminate\Foundation\Http\FormRequest;
 use Illuminate\Validation\Rule;
 
@@ -34,7 +35,7 @@ class StoreFinancialAccountRequest extends FormRequest
             'kind' => ['required', Rule::in(['cash', 'bank_account', 'e_wallet', 'checking_account', 'credit_card'])],
             'name' => ['required', 'string', 'max:255'],
             'account_number' => [Rule::requiredIf($this->kind !== 'cash'), 'nullable', 'string', 'max:100'],
-            'account_holder' => ['nullable', 'string', 'max:255'],
+            'account_holder' => ['nullable', 'integer', Rule::exists('user_accounts', 'id')->where('is_active', true)],
             'description' => ['nullable', 'string', 'max:255'],
             'currency' => ['required', 'string', 'size:3'],
             'credit_limit' => [Rule::requiredIf($this->kind === 'credit_card'), 'nullable', 'numeric', 'gte:0'],
@@ -44,8 +45,12 @@ class StoreFinancialAccountRequest extends FormRequest
             'usable_for_receipts' => ['sometimes', 'boolean'],
             'usable_for_payments' => ['sometimes', 'boolean'],
             'is_active' => ['sometimes', 'boolean'],
-            'applications' => ['sometimes', 'array', 'distinct'],
-            'applications.*' => ['required', Rule::in(\App\Models\FinancialAccountApplication::selectable())],
+            'application_ids' => ['sometimes', 'array', 'distinct'],
+            'application_ids.*' => [
+                'required',
+                'integer',
+                Rule::exists('financial_account_application_types', 'id')->where('is_active', true),
+            ],
         ];
     }
 
@@ -80,6 +85,15 @@ class StoreFinancialAccountRequest extends FormRequest
     {
         if ($this->has('currency')) {
             $this->merge(['currency' => strtoupper((string) $this->currency)]);
+        }
+        $applications = $this->input('application_ids', $this->input('applications'));
+        if (is_array($applications)) {
+            $this->merge([
+                'application_ids' => array_map(
+                    [FinancialAccountApplication::class, 'normalizeId'],
+                    $applications
+                ),
+            ]);
         }
     }
 }

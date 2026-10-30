@@ -76,7 +76,7 @@ class StorePaymentRequest extends FormRequest
                     $validator->errors()->add("lines.{$index}.installment_count", 'Installments are only supported for credit-card payment lines.');
                 }
                 if ($account) {
-                    $applications = $account->applications()->pluck('application');
+                    $applications = $account->applications()->with('type')->get()->pluck('application');
                     $requiredApplication = match ($this->type) {
                         'customer' => \App\Models\FinancialAccountApplication::CUSTOMER_RECEIPT,
                         'purchase_order' => \App\Models\FinancialAccountApplication::PURCHASE_ORDER_PAYMENT,
@@ -114,7 +114,7 @@ class StorePaymentRequest extends FormRequest
                 if ($paymentTotal > (float) $total - (float) $paid) {
                     $validator->errors()->add('lines', 'The payment total exceeds the unpaid document balance.');
                 }
-                if (in_array($document->status, ['paid', 'cancelled'])) {
+                if (in_array($document->status, ['paid', 'refunded', 'cancelled'])) {
                     $field = match ($this->type) {
                         'customer' => 'sales_invoice_id', 'expense' => 'expense_id', default => 'purchase_order_id'
                     };

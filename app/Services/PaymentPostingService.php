@@ -8,7 +8,10 @@ use Illuminate\Validation\ValidationException;
 
 class PaymentPostingService
 {
-    public function __construct(private CreditCardCycleService $creditCardCycles) {}
+    public function __construct(
+        private CreditCardCycleService $creditCardCycles,
+        private CustomerRefundService $customerRefunds,
+    ) {}
 
     public function post(Payment $payment, ?int $userId): Payment
     {
@@ -83,6 +86,12 @@ class PaymentPostingService
                 throw ValidationException::withMessages(['status' => 'Only posted payments can be voided.']);
             }
 
+            if ($payment->refunds()->where('status', 'posted')->exists()) {
+                throw ValidationException::withMessages([
+                    'status' => 'This payment has posted customer refunds. Void those refunds first.',
+                ]);
+            }
+
             if ($payment->lines()->whereHas('settlementItems.settlement', fn ($query) => $query->where('status', 'posted'))->exists()) {
                 throw ValidationException::withMessages([
                     'status' => 'This payment is included in a posted end-of-day settlement. Void the settlement first.',
@@ -119,8 +128,12 @@ class PaymentPostingService
 
     private function refreshDocumentStatus(Payment $payment): void
     {
+        if ($payment->type === 'customer' && $payment->salesInvoice) {
+            $this->customerRefunds->refreshInvoiceStatus($payment->salesInvoice);
+            return;
+        }
+
         $document = match ($payment->type) {
-            'customer' => $payment->salesInvoice,
             'purchase_order' => $payment->purchaseOrder,
             'expense' => $payment->expense,
             default => null,
@@ -148,9 +161,15 @@ class PaymentPostingService
             return;
         }
 
+        if ($payment->type === 'expense' && $document->approval_status !== 'approved') {
+            throw ValidationException::withMessages([
+                'expense_id' => 'The expense must be approved before payment can be posted.',
+            ]);
+        }
+
         $total = $payment->type === 'expense' ? $document->amount : $document->total_amount;
         $paid = $document->payments()->where('status', 'posted')->sum('amount');
-        if (in_array($document->status, ['paid', 'cancelled']) || (float) $payment->amount > (float) $total - (float) $paid) {
+        if (in_array($document->status, ['paid', 'refunded', 'cancelled']) || (float) $payment->amount > (float) $total - (float) $paid) {
             throw ValidationException::withMessages(['amount' => 'The payment exceeds the current payable balance.']);
         }
     }

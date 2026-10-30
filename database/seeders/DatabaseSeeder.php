@@ -15,9 +15,21 @@ class DatabaseSeeder extends Seeder
     {
         $this->call(AccountingSeeder::class);
 
-        User::updateOrCreate(
+        $admin = User::updateOrCreate(
             ['email' => env('ADMIN_EMAIL', 'admin@example.test')],
-            ['name' => 'Administrator', 'password' => Hash::make(env('ADMIN_PASSWORD', 'password'))]
+            [
+                'name' => 'Administrator',
+                'username' => env('ADMIN_USERNAME', 'superadmin'),
+                'password' => Hash::make(env('ADMIN_PASSWORD', 'password')),
+                'role' => User::ROLE_SUPER_ADMIN,
+                'is_active' => true,
+            ]
         );
+
+        $admin->profile()->firstOrCreate([], [
+            'first_name' => 'System',
+            'last_name' => 'Administrator',
+            'job_title' => 'Super Administrator',
+        ]);
     }
 }

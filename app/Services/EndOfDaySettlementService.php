@@ -171,7 +171,8 @@ class EndOfDaySettlementService
             || $destination->chartAccount?->type !== 'asset') {
             throw ValidationException::withMessages(['destination_financial_account_id' => 'The destination must be an active receipt-enabled asset account in the settlement currency.']);
         }
-        if (! $destination->applications()->where('application', FinancialAccountApplication::END_OF_DAY_SETTLEMENT)->exists()) {
+        if (! $destination->applications()->whereHas('type', fn ($type) => $type
+            ->where('code', FinancialAccountApplication::END_OF_DAY_SETTLEMENT))->exists()) {
             throw ValidationException::withMessages(['destination_financial_account_id' => 'The destination account is not enabled for end-of-day settlement.']);
         }
         foreach ($branchIds as $branchId) {

@@ -24,8 +24,25 @@ class FinancialAccount extends Model
 
     protected $casts = [
         'credit_limit' => 'decimal:4', 'is_company_wide' => 'boolean', 'usable_for_receipts' => 'boolean',
-        'usable_for_payments' => 'boolean', 'is_active' => 'boolean',
+        'current_balance' => 'decimal:4', 'available_balance' => 'decimal:4',
+        'balance_updated_at' => 'datetime', 'usable_for_payments' => 'boolean', 'is_active' => 'boolean',
     ];
+
+    protected static function booted(): void
+    {
+        static::saving(function (FinancialAccount $account) {
+            if (! $account->exists || $account->isDirty(['kind', 'credit_limit', 'current_balance'])) {
+                $current = bcadd((string) ($account->current_balance ?? 0), '0', 4);
+                $account->current_balance = $current;
+                $account->available_balance = $account->kind === 'credit_card'
+                    ? bcsub((string) ($account->credit_limit ?? 0), $current, 4)
+                    : $current;
+                if (! $account->exists && ! $account->balance_updated_at) {
+                    $account->balance_updated_at = now();
+                }
+            }
+        });
+    }
 
     public function institution()
     {
@@ -35,6 +52,11 @@ class FinancialAccount extends Model
     public function ownerBranch()
     {
         return $this->belongsTo(Branch::class, 'owner_branch_id');
+    }
+
+    public function userAccount()
+    {
+        return $this->belongsTo(UserAccount::class, 'account_holder');
     }
 
     public function accessibleBranches()
@@ -49,7 +71,14 @@ class FinancialAccount extends Model
 
     public function applications()
     {
-        return $this->hasMany(FinancialAccountApplication::class)->orderBy('application');
+        return $this->hasMany(FinancialAccountApplication::class)->with('type')->orderBy('application_id');
+    }
+
+    public function creditCardStatements()
+    {
+        return $this->hasMany(PaymentObligation::class)
+            ->where('type', 'credit_card_statement')
+            ->orderBy('due_date');
     }
 
     public function scopeAvailableToBranch($query, int $branchId)
